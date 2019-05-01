@@ -8,7 +8,7 @@
 
 这条命令其实就是进入了调试界面了如果敲了这个命令进入调试界面后的结果如下：
 
-![gdb1](.\img\gdb1.png)
+![gdb1](./img/gdb1.png)
 
 会发现在命令行上方出现了一系列和gdb版本有关的内容，如果不想看到这些内容的话，需要在命令中添加 -q 的选项。
 
@@ -20,7 +20,7 @@
 
 
 
-![gdb2](.\img\gdb2.png)
+![gdb2](./img/gdb2.png)
 
 当然后面还能跟特定的函数名等等的参数。比如list main。
 
@@ -28,7 +28,7 @@
 
 设置断点，break linenum, 如果需要查看所有断点的信息则输入命令info breakpoints, 删除断点则用disable命令、clear命令或者delete命令实现
 
-![gdb3](.\img\gdb3.png)
+![gdb3](./img/gdb3.png)
 
 ###### run
 
