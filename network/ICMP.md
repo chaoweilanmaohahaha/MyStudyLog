@@ -12,7 +12,7 @@ icmp协议：internet control message protocol 网络控制信息协议
 
 ICMP协议的type域控制了这个报文的类型，而code域则说明这是该种类型报文中的第几种类型的报文，例如图中是最经典的ping request报文，它的type和code域分别为8和0。checksum域是对icmp协议做校验，和ip报文中的checksum域类似。
 
-###### ICMP错误信息中，在生成错误负载的时候必须包含至少8字节的IP报文内容
+###### ICMP错误信息中，在生成错误负载的时候必须包含至少8字节的IP报文内容！
 
 
 
