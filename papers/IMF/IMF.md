@@ -18,14 +18,6 @@
 
 
 
-logger：
-
-inferer：
-
-fuzzer：
-
-
-
 ## IMF工具的探究
 
 从github上把工具整个荡了下来，分析一下其中的源码，然后看一下具体实现，这个工具是用python编写的。
@@ -45,9 +37,21 @@ $ clang -framework IOKit -framework CoreFoundation -arch i386 fuzz.c -o fuzz
 $ ./fuzz -f [log path] -s [seed] -b [bitlen] -r [rate] -l [# of max loops]
 ```
 
-hook.py 生成一个代码.c的代码文件，然后用第二步进行编译
+hook.py 生成一个代码.c的代码文件，然后用第二步进行编译，钩子函数通常的写法是这压根
+
+```
+type fake_func (args){
+    /*the input args state*/
+    func(args)
+    /*the output of func*/
+}
+```
 
 DYLD_INSERT_LIBRARIES的目的是通过向宏DYLD_INSERT_LIBRARIES里写入动态库完整路径。就可以在执行文件加载时将该动态库插入。
+
+Mac offers a way to override functions in a shared library with **DYLD_INSERT_LIBRARIES** environment variable (which is similar to LD_PRELOAD on Linux). When you make a twin brother of a function that is defined in an existing shared library, put it in you a shared library, and **you register your shared library name in DYLD_INSERT_LIBRARIES, your function is used instead of the original one**. This is my simple test.
+
+filter.py 通过最长前缀匹配的方式，将众多个log过滤成只剩两个log
 
 apifuzz 讲道理就是生成fuzz.c文件的一个函数
 
