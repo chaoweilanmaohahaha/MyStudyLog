@@ -18,7 +18,7 @@ OOB：我认为就是缓冲区溢出，也就是进入了超出分配堆栈的�
 
 ## overview
 
-hypervisor:被Hypervisor用来执行一个或多个虚拟机器的电脑称为主体机器（host machine），这些虚拟机器则称为客体机器（guest machine）。hypervisor提供虚拟的作业平台来执行客体操作系统（guest operating systems），负责管理其他客体操作系统的执行阶段；这些客体操作系统，共同分享虚拟化后的硬件资源
+hypervisor: 被Hypervisor用来执行一个或多个虚拟机器的电脑称为主体机器（host machine），这些虚拟机器则称为客体机器（guest machine）。hypervisor提供虚拟的作业平台来执行客体操作系统（guest operating systems），负责管理其他客体操作系统的执行阶段；这些客体操作系统，共同分享虚拟化后的硬件资源
 
 这里有个问题是在于内存的监控方面，对于闭源的操作系统我们没法在源代码中植入一些方法来监控内存的分配情况。并且我们要知道一点，对于每一个程序，进程他们都跑在自己的虚拟地址空间上，在windows平台就很难去监控物理地址空间的变化，因为在windows平台上他们的映射并不是线性的。这里用的是监控shadow page table(**shadow page table** mirrors what the guest is doing in terms of its own **page table**s and in terms of what the VMM translates the guest physical address to the host physical address)
 
@@ -44,5 +44,5 @@ VMM infrastructure：在完成初始化后将OS加载到一个虚拟机中，然
   * UNPROBE的检测：探测在MemAccess之前是否有Probe***的事件，这个过程需要fuzzer和log analyzer的配合。
   * TOCTTOU的检测：如果两次MemAccess获取了同一个区域的数据，我们需要判断是否这事件在同一个调用中进行。
 * 通过内存足迹来检测漏洞：就是检测内存的分配释放和进入。Illegal memory access will be captured by its page-fault handler in the hypervisor。为了跟踪分配的和释放的区域需要hook一些函数
-  * UAF的检测:hook一些释放内存的函数,检测是否在这片区域还没分配之前已经进入.
-  * OOB的检测:用平衡二叉树来保存分配的内存情况.
+  * UAF的检测:hook一些释放内存的函数,检测是否在这片区域还没分配之前已经进入。
+  * OOB的检测:用平衡二叉树来保存分配的内存情况。
