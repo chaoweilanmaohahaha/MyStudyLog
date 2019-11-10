@@ -13,7 +13,7 @@ static final int MAXIMUM_CAPACITY = 1 << 30; // hash表最大容量
 static final float DEFAULT_LOAD_FACTOR = 0.75f; // hash表初始负载因子
 ```
 
-这里要提前说一下，在HashMap实现中有一点。Hashmap一般处于一个“桶状”的hash表状态，如果这个结构太大，即结点数过多时，会转换成树状结构，来提高性能。为什么不一开始就使用树状的HashMap呢？那是因为一个树结点比普通结点要大出一倍的空间，如果当前的hash表够用就没必要使用树状结点。当然如果入口数缩减到一定数量，HashMap也能保证可以从树状态变回到桶装结构。这需要两个阈值来控制：
+这里要提前说一下，在HashMap实现中有一点。Hashmap一般处于一个“桶状”的hash表状态，如果这个结构太大，即结点数过多时，会转换成树状结构，来提高性能（其实后面可以看到这个转换并没有删除原来的桶结构）。为什么不一开始就使用树状的HashMap呢？那是因为一个树结点比普通结点要大出一倍的空间，如果当前的hash表够用就没必要使用树状结点。当然如果入口数缩减到一定数量，HashMap也能保证可以从树状态变回到桶装结构。这需要两个阈值来控制：
 
 ```C
 static final int TREEIFY_THRESHOLD = 8; // 从桶状态变为树状结构
@@ -163,7 +163,7 @@ final Node<K,V>[] resize() {  // 为什么把这个函数放在初始化中呢�
                 if (e.next == null)
                     newTab[e.hash & (newCap - 1)] = e;  // 如果这个hash表的这个入口只有一个普通结点，那么只需要将这个结点重新放入新的hash表入口就可以了
                 else if (e instanceof TreeNode)
-                    ((TreeNode<K,V>)e).split(this, newTab, j, oldCap); // 当前处于树状态就由树结点的处理函数处理
+                    ((TreeNode<K,V>)e).split(this, newTab, j, oldCap); // 当前处于树状态就由树结点的处理函数处理，为什么下面的搬动过程中会出现高端链表和低端链表两条链表，那是因为在这个split的过程中会出现裁剪的行为，具体看一下split的操作
                 else { // preserve order
                     Node<K,V> loHead = null, loTail = null;
                     Node<K,V> hiHead = null, hiTail = null;
@@ -352,7 +352,7 @@ final Node<K,V> removeNode(int hash, Object key, Object value,
 讲到contains操作，在Map中还加入了containsValue，你可以认为这两个操作一个是判断key值是否存在，一个是判断value值是否存在，在实现上也是很暴力的。
 
 ```java
-public boolean containsValue(Object value) { // 但是这个函数看来非常奇怪，似乎忽略了树状态下的Map
+public boolean containsValue(Object value) {
         Node<K,V>[] tab; V v;
         if ((tab = table) != null && size > 0) {
             for (int i = 0; i < tab.length; ++i) {
@@ -512,3 +512,340 @@ final class EntrySet extends AbstractSet<Map.Entry<K,V>> {
 ---
 
 ## TreeNode的各种操作
+
+我们仔细看一下TreeNode类可以看到，它是继承了LinkedTreeMap类的Entry类，但是如果再深入下去，我们又会发现这个Entry类同时又继承了HashMap的Node类。所以相当于这个TreeNode存在两套定义，一个可以作为树结点被红黑树处理，但是它又还是Node结点挂在了table表上，因此实际上TreeNode的存在只是为了提高查找效率。
+
+所以我们发现在contains函数，包括树结构的遍历器中只提及了table表。
+
+下面看一下具体的jdk中的红黑树写法，也算是学习一下：
+
+### 找到一个结点
+
+```java
+final TreeNode<K,V> getTreeNode(int h, Object k) {
+    return ((parent != null) ? root() : this).find(h, k, null);
+    // 这个函数很浓缩，判断是否是从中间节点还是从根结点
+}
+
+final TreeNode<K,V> find(int h, Object k, Class<?> kc) {  
+// 已经保证了一定是从根结点出发的， h是hash值， k是键
+// 这个的本质还是一个迭代，只不过分成按照hash值和按照类来查找
+    TreeNode<K,V> p = this;
+    do {
+        int ph, dir; K pk;
+        TreeNode<K,V> pl = p.left, pr = p.right, q;
+        if ((ph = p.hash) > h)
+            p = pl;
+        else if (ph < h)
+            p = pr;
+        else if ((pk = p.key) == k || (k != null && k.equals(pk)))  // 找到了结点
+            return p;
+        else if (pl == null)  // 走到这里，说明hash值相等，但是并不是想要找的那个结点
+            p = pr;
+        else if (pr == null)
+            p = pl;
+        else if ((kc != null ||
+                  (kc = comparableClassFor(k)) != null) &&
+                  // 获取的是kc的类名已经接口名，例class M implement K
+                 (dir = compareComparables(kc, k, pk)) != 0)
+                 // 看k和pk进行比较大小的一个函数，这是用类来进行比较
+            p = (dir < 0) ? pl : pr;
+        else if ((q = pr.find(h, k, kc)) != null)
+            return q;
+        else
+            p = pl;
+    } while (p != null);
+    return null;
+}
+```
+
+### 化为树形态和还原
+
+```java
+final void treeify(Node<K,V>[] tab) {
+    TreeNode<K,V> root = null;
+    // 下面那个x默认是表头指针
+    for (TreeNode<K,V> x = this, next; x != null; x = next) {
+        next = (TreeNode<K,V>)x.next;
+        x.left = x.right = null;
+        if (root == null) { // 如果这是根节点
+            x.parent = null;
+            x.red = false;
+            root = x;
+        }
+        else {
+            K k = x.key;
+            int h = x.hash;
+            Class<?> kc = null;
+            for (TreeNode<K,V> p = root;;) { // 下面开始查找插入位置
+                int dir, ph;
+                K pk = p.key;
+                if ((ph = p.hash) > h)
+                    dir = -1;
+                else if (ph < h)
+                    dir = 1;
+                else if ((kc == null &&
+                          (kc = comparableClassFor(k)) == null) ||
+                         (dir = compareComparables(kc, k, pk)) == 0)
+                    dir = tieBreakOrder(k, pk); 
+                    // 走到这里说明hash值相等了，那就要使用这个函数来比较这两个结点的大小
+
+                TreeNode<K,V> xp = p;
+                if ((p = (dir <= 0) ? p.left : p.right) == null) {
+                    x.parent = xp;
+                    if (dir <= 0)
+                        xp.left = x;
+                    else
+                        xp.right = x;
+                    root = balanceInsertion(root, x); // 插入一个结点之后用这个函数来维持红黑树
+                    break;
+                }
+            }
+        }
+    }
+    moveRootToFront(tab, root);  // 这样做了需要保证一点，链表头就要是树的根节点了
+}
+
+static <K,V> void moveRootToFront(Node<K,V>[] tab, TreeNode<K,V> root) {
+    int n;
+    if (root != null && tab != null && (n = tab.length) > 0) {
+        int index = (n - 1) & root.hash;
+        TreeNode<K,V> first = (TreeNode<K,V>)tab[index];
+        if (root != first) {
+            Node<K,V> rn;
+            tab[index] = root;
+            TreeNode<K,V> rp = root.prev; // 先获取这个结点的前向结点
+            if ((rn = root.next) != null)
+                ((TreeNode<K,V>)rn).prev = rp; // 让root结点的下一个结点的前向指针指向rn
+            if (rp != null)
+                rp.next = rn; //  修改指针
+            if (first != null)
+                first.prev = root;  // 修改指针
+            root.next = first;
+            root.prev = null;
+        } // 这一步究竟在干啥，其实就是将root的位置移动到了表头之后，需要修改root的一些指针指向，同时又要修改原表头结点的指针指向
+        assert checkInvariants(root);
+    }
+```
+
+那么解树结构的代码就相对简单了很多：
+
+```java
+final Node<K,V> untreeify(HashMap<K,V> map) {
+    Node<K,V> hd = null, tl = null;
+    for (Node<K,V> q = this; q != null; q = q.next) {
+        Node<K,V> p = map.replacementNode(q, null);  // 还原成Node结点
+        if (tl == null)
+            hd = p;
+        else
+            tl.next = p;
+        tl = p;
+    } // 然后此时根据结点next顺序重新构建链表
+    return hd;
+}
+```
+
+### 插入与删除
+
+```java
+final TreeNode<K,V> putTreeVal(HashMap<K,V> map, Node<K,V>[] tab,
+                                       int h, K k, V v) {  // 用在之前的那个putVal中
+    Class<?> kc = null;
+    boolean searched = false;
+    TreeNode<K,V> root = (parent != null) ? root() : this;  // 从根结点处开始查找
+    for (TreeNode<K,V> p = root;;) {
+        int dir, ph; K pk;
+        if ((ph = p.hash) > h)
+            dir = -1;
+        else if (ph < h)
+            dir = 1;
+        else if ((pk = p.key) == k || (k != null && k.equals(pk)))
+            return p;
+        else if ((kc == null &&
+                  (kc = comparableClassFor(k)) == null) ||
+                 (dir = compareComparables(kc, k, pk)) == 0) {  // 一样道理，到这边说明hash值已经是一样的了
+            if (!searched) {
+                TreeNode<K,V> q, ch;
+                searched = true;
+                if (((ch = p.left) != null &&
+                     (q = ch.find(h, k, kc)) != null) ||
+                    ((ch = p.right) != null &&
+                     (q = ch.find(h, k, kc)) != null))
+                    return q;
+            }
+            dir = tieBreakOrder(k, pk);
+        } // 走到这里，说明一点，那就是如果这个key已经出现在这棵树当中了，那么我们直接把这个结点返回出去
+		// 那从下面开始就是没有找到该结点位置的操作了
+        TreeNode<K,V> xp = p;
+        if ((p = (dir <= 0) ? p.left : p.right) == null) {
+            Node<K,V> xpn = xp.next;
+            TreeNode<K,V> x = map.newTreeNode(h, k, v, xpn);
+            if (dir <= 0) // 根据上面dir最后的结果确定新结点的插入点
+                xp.left = x;
+            else
+                xp.right = x;
+            xp.next = x; // 修改指针
+            x.parent = x.prev = xp;  // 修改指针
+            if (xpn != null)
+                ((TreeNode<K,V>)xpn).prev = x;
+            moveRootToFront(tab, balanceInsertion(root, x)); // 插入这个新节点后要重新调整结构
+            return null;
+        }
+    }
+}
+
+final void removeTreeNode(HashMap<K,V> map, Node<K,V>[] tab,
+                                  boolean movable) {  // 在上面的remove操作中使用
+    //从这个参数列表中也可以看出，这个删除的操作需要从两个地方都删除掉
+    int n;
+    if (tab == null || (n = tab.length) == 0)
+        return;
+    int index = (n - 1) & hash;
+    TreeNode<K,V> first = (TreeNode<K,V>)tab[index], root = first, rl;
+    TreeNode<K,V> succ = (TreeNode<K,V>)next, pred = prev;
+    if (pred == null) // 当前结点的前向结点是空的
+        tab[index] = first = succ; // 直接让表头指向它的next结点
+    else
+        pred.next = succ; // 它的前向结点的后继应该是自己的后继
+    if (succ != null)
+        succ.prev = pred; // 调整后继结点的前向指针
+    if (first == null)
+        return;
+    if (root.parent != null)
+        root = root.root();
+    if (root == null || root.right == null ||
+        (rl = root.left) == null || rl.left == null) {
+        tab[index] = first.untreeify(map);  // too small
+        return;
+    } // 这里以上可以认为是在调整链表的指针情况
+    // 从下面开始是调整红黑树上删除了该节点的操作，由于删除一个结点之后树的颜色和结构都要发生变化，这部分我们留到数据结构中去探讨，此处只需要知道的是，这里是在处理删除红黑树的结点所必须的一些操作
+    TreeNode<K,V> p = this, pl = left, pr = right, replacement;
+    if (pl != null && pr != null) {
+        TreeNode<K,V> s = pr, sl;
+        while ((sl = s.left) != null) // find successor
+            s = sl;
+        boolean c = s.red; s.red = p.red; p.red = c; // swap colors
+        TreeNode<K,V> sr = s.right;
+        TreeNode<K,V> pp = p.parent;
+        if (s == pr) { // p was s's direct parent
+            p.parent = s;
+            s.right = p;
+        }
+        else {
+            TreeNode<K,V> sp = s.parent;
+            if ((p.parent = sp) != null) {
+                if (s == sp.left)
+                    sp.left = p;
+                else
+                    sp.right = p;
+            }
+            if ((s.right = pr) != null)
+                pr.parent = s;
+        }
+        p.left = null;
+        if ((p.right = sr) != null)
+            sr.parent = p;
+        if ((s.left = pl) != null)
+            pl.parent = s;
+        if ((s.parent = pp) == null)
+            root = s;
+        else if (p == pp.left)
+            pp.left = s;
+        else
+            pp.right = s;
+        if (sr != null)
+            replacement = sr;
+        else
+            replacement = p;
+    }
+    else if (pl != null)
+        replacement = pl;
+    else if (pr != null)
+        replacement = pr;
+    else
+        replacement = p;
+    if (replacement != p) {
+        TreeNode<K,V> pp = replacement.parent = p.parent;
+        if (pp == null)
+            root = replacement;
+        else if (p == pp.left)
+            pp.left = replacement;
+        else
+            pp.right = replacement;
+        p.left = p.right = p.parent = null;
+    }
+
+    TreeNode<K,V> r = p.red ? root : balanceDeletion(root, replacement);
+
+    if (replacement == p) {  // detach
+        TreeNode<K,V> pp = p.parent;
+        p.parent = null;
+        if (pp != null) {
+            if (p == pp.left)
+                pp.left = null;
+            else if (p == pp.right)
+                pp.right = null;
+        }
+    }
+    if (movable)
+        moveRootToFront(tab, r);
+}
+```
+
+### 剪枝
+
+这是我们看到的有关树结点的最后一个操作，也就是树的裁剪，这一部分和上面的resize的一些操作密切相关，考虑到树的结构可能也会非常大，所以要适当对树结点进行裁剪以保证效率。这个函数在resize函数中调用了，这也解释了为什么在resize的扩容操作中，链表会分为低端链表和高端链表两条。
+
+```java
+final void split(HashMap<K,V> map, Node<K,V>[] tab, int index, int bit) {
+            TreeNode<K,V> b = this;
+    // bit指老的table的长度
+    // Relink into lo and hi lists, preserving order
+    TreeNode<K,V> loHead = null, loTail = null;
+    TreeNode<K,V> hiHead = null, hiTail = null;
+    int lc = 0, hc = 0;
+    for (TreeNode<K,V> e = b, next; e != null; e = next) {
+        next = (TreeNode<K,V>)e.next;
+        e.next = null;
+        // 这里开始判断把这个树结点归为哪一个部分比较合适，分界线是老的表长度
+        if ((e.hash & bit) == 0) {
+            if ((e.prev = loTail) == null)
+                loHead = e;
+            else
+                loTail.next = e;
+            loTail = e;
+            ++lc;
+        }
+        else {
+            if ((e.prev = hiTail) == null)
+                hiHead = e;
+            else
+                hiTail.next = e;
+            hiTail = e;
+            ++hc;
+        }
+    }
+
+    if (loHead != null) {
+        if (lc <= UNTREEIFY_THRESHOLD) // 如果此时裁剪过后发现低端的链表长度比较短，则可以将树结构释放掉
+            tab[index] = loHead.untreeify(map);
+        else {
+            tab[index] = loHead; // 否则
+            if (hiHead != null) // (else is a lready treeified)
+                loHead.treeify(tab);  // 重新建树
+        }
+    }
+    if (hiHead != null) {
+        if (hc <= UNTREEIFY_THRESHOLD) // 同样的操作
+            tab[index + bit] = hiHead.untreeify(map);
+        else {
+            tab[index + bit] = hiHead;
+            if (loHead != null)
+                hiHead.treeify(tab);
+        }
+    }
+}
+```
+
+到这里，以上就是hashmap中常见的一些方法了，而文件到这里其实还并没有结束，因为使用了红黑树的结构，所以余下部分都是有关红黑树的操作了，这些操作的详细解释留到数据结构中再来详细叙述了。
+
