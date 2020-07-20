@@ -105,19 +105,190 @@ edit_params是编辑了参数之后喂给系统调用execvp来最终执行这个
 
 这个程序就是和编译汇编有点关系了，在afl-gcc中制定了编译程序的地址。这个程序比上面的gcc要庞大，先从main函数结构入手了。在经过了一些对于参数的判断之后，函数的一开始是通过当前的时间以及当前的进程号来设定了一个随机种子。然后同样需要一个edit_params的函数来编辑一下参数形式。接下去会进行一系列全局变量的设置，随后进入一个分支，如果在编辑参数时发现是调用了--version则进行一个分支操作，否则会调用一个叫做add_instrumentation的函数，然后就fork出一个新的进程来执行编译的操作了。这个add_instrumentation函数在做什么呢？
 
-这一步就是在进行插桩，而插桩的内容就在afl-as.h中，它获取需要使用汇编编译的输入文件，然后将该文件读入一个临时文件中，而在这个文件中，在开始阶段会插入一部分的桩汇编代码，同时在每个分支处也会插入桩代码，然后就使用as去编译该临时文件来生成.o文件，从而完成了所谓的插桩。具体的插桩到底它做了什么这个需要具体再看一下代码。
+这一步就是在进行插桩，而插桩的内容就在afl-as.h中，它获取需要使用汇编编译的输入文件，然后将该文件读入一个临时文件中，而在这个文件中，**在开始阶段会插入一部分的桩汇编代码，同时在每个分支处也会插入桩代码，然后就使用as去编译该临时文件来生成.o文件**，从而完成了所谓的插桩。具体的插桩到底它做了什么这个需要具体再看一下代码。
 
 具体以下面的例子来看：
 
-```
+```c
 #include<stdio.h>
 int main() {
-    int a;
-    scanf("%d", &a);
+    printf("hello world");
+    return 0;
 }
 ```
 
+as 的目的是是要给程序中每一个可能的执行分支都要注入一个叫做 afl_maybe_log 的函数，另外就是在整个文件最后注入一个庞大的 afl 自己编写的 payload，里面有着很多可能触发到的函数。(实际目前来看，这个 afl_maybe_log 可能被注入在函数开头和所有有关跳转(jm开头的指令)后)，这样可以捕获控制流。
 
+**AFL_MAYBE_LOG**
+
+```assembly
+00000000004007f0 <__afl_maybe_log>:
+  4007f0:	9f                   	lahf   
+  4007f1:	0f 90 c0             	seto   %al
+  4007f4:	48 8b 15 85 08 20 00 	mov    0x200885(%rip),%rdx        # 601080 <__afl_area_ptr>
+  4007fb:	48 85 d2             	test   %rdx,%rdx
+  4007fe:	74 20                	je     400820 <__afl_setup>
+```
+
+可以看到如果是刚进入这个程序，afl_area_ptr 这个指针肯定是空的，则进行 afl_setup 的操作。我们这里先不看初始化，如果已经有了指针的值，则直接触发 afl_store 函数：
+
+**AFL_STORE**
+
+```
+0000000000400800 <__afl_store>:
+  400800:	48 33 0d 81 08 20 00 	xor    0x200881(%rip),%rcx        # 601088 <__afl_prev_loc>  // 一开始 afl_prev_loc 为 0，但是其实代表以前的地址
+  400807:	48 31 0d 7a 08 20 00 	xor    %rcx,0x20087a(%rip)        # 601088 <__afl_prev_loc>  // 此时的意思是 afl_prev_loc = rcx
+  40080e:	48 d1 2d 73 08 20 00 	shrq   0x200873(%rip)        # 601088 <__afl_prev_loc> // 右移
+  400815:	fe 04 0a             	incb   (%rdx,%rcx,1)  // share_men 加 1
+```
+
+这一段就是 AFL 的重要的一段计算 hash 的代码(从中看出，afl_area_ptr 的含义就是保存 Coverage 的 上 map)，为什么是 64K，**其实是在 AFL_fuzz 文件中开辟共享内存时规定了大小**。因为 rcx 初始值是 16 位的，在下面运算中可以发现没有办法改变 rcx 最大是 16 位的事实，所以，为什么会这样，因为在 add_instrument 中能够看到下面这段代码：
+
+```c
+cur_location = <COMPILE_TIME_RANDOM>;
+shared_mem[cur_location ^ prev_location]++; 
+prev_location = cur_location >> 1;
+
+// in add_instrument
+fprintf(outf, use_64bit ? trampoline_fmt_64 : trampoline_fmt_32,
+             R(MAP_SIZE));
+```
+
+在 AFL_STORE 后面就直接返回了。
+
+**AFL_SETUP**
+
+```
+0000000000400820 <__afl_setup>:
+  400820:	80 3d 71 08 20 00 00 	cmpb   $0x0,0x200871(%rip)        # 601098 <__afl_setup_failure> // 如果失败
+  400827:	75 ef                	jne    400818 <__afl_return>
+  400829:	48 8d 15 70 08 20 00 	lea    0x200870(%rip),%rdx        # 6010a0 <__afl_global_area_ptr> // 共享内存的地址
+  400830:	48 8b 12             	mov    (%rdx),%rdx
+  400833:	48 85 d2             	test   %rdx,%rdx
+  400836:	74 09                	je     400841 <__afl_setup_first>
+  400838:	48 89 15 41 08 20 00 	mov    %rdx,0x200841(%rip)        # 601080 <__afl_area_ptr> // 这边可以看到，当走完这个分支，afl_area_ptr 指针被赋值了
+  40083f:	eb bf                	jmp    400800 <__afl_store> // 初始化后跳回 afl_store
+```
+
+接着看 afl_setup_first
+
+```
+0000000000400841 <__afl_setup_first>:
+  400841:	48 8d a4 24 a0 fe ff 	lea    -0x160(%rsp),%rsp
+  400848:	ff 
+  400849:	48 89 04 24          	mov    %rax,(%rsp)
+  40084d:	48 89 4c 24 08       	mov    %rcx,0x8(%rsp)
+  400852:	48 89 7c 24 10       	mov    %rdi,0x10(%rsp)
+  400857:	48 89 74 24 20       	mov    %rsi,0x20(%rsp)
+  40085c:	4c 89 44 24 28       	mov    %r8,0x28(%rsp)
+  400861:	4c 89 4c 24 30       	mov    %r9,0x30(%rsp)
+  400866:	4c 89 54 24 38       	mov    %r10,0x38(%rsp)
+  40086b:	4c 89 5c 24 40       	mov    %r11,0x40(%rsp)
+  400870:	66 0f d6 44 24 60    	movq   %xmm0,0x60(%rsp)
+  400876:	66 0f d6 4c 24 70    	movq   %xmm1,0x70(%rsp)
+  40087c:	66 0f d6 94 24 80 00 	movq   %xmm2,0x80(%rsp)
+  400883:	00 00 
+  400885:	66 0f d6 9c 24 90 00 	movq   %xmm3,0x90(%rsp)
+  40088c:	00 00 
+  40088e:	66 0f d6 a4 24 a0 00 	movq   %xmm4,0xa0(%rsp)
+  400895:	00 00 
+  400897:	66 0f d6 ac 24 b0 00 	movq   %xmm5,0xb0(%rsp)
+  40089e:	00 00 
+  4008a0:	66 0f d6 b4 24 c0 00 	movq   %xmm6,0xc0(%rsp)
+  4008a7:	00 00 
+  4008a9:	66 0f d6 bc 24 d0 00 	movq   %xmm7,0xd0(%rsp)
+  4008b0:	00 00 
+  4008b2:	66 44 0f d6 84 24 e0 	movq   %xmm8,0xe0(%rsp)
+  4008b9:	00 00 00 
+  4008bc:	66 44 0f d6 8c 24 f0 	movq   %xmm9,0xf0(%rsp)
+  4008c3:	00 00 00 
+  4008c6:	66 44 0f d6 94 24 00 	movq   %xmm10,0x100(%rsp)
+  4008cd:	01 00 00 
+  4008d0:	66 44 0f d6 9c 24 10 	movq   %xmm11,0x110(%rsp)
+  4008d7:	01 00 00 
+  4008da:	66 44 0f d6 a4 24 20 	movq   %xmm12,0x120(%rsp)
+  4008e1:	01 00 00 
+  4008e4:	66 44 0f d6 ac 24 30 	movq   %xmm13,0x130(%rsp)
+  4008eb:	01 00 00 
+  4008ee:	66 44 0f d6 b4 24 40 	movq   %xmm14,0x140(%rsp)
+  4008f5:	01 00 00 
+  4008f8:	66 44 0f d6 bc 24 50 	movq   %xmm15,0x150(%rsp)
+  4008ff:	01 00 00                // 这一行朝上，可以看得出这里把所有的寄存器状态都压到栈中了
+  400902:	41 54                	push   %r12 // 这个 r12 很像 rbp 指针
+  400904:	49 89 e4             	mov    %rsp,%r12
+  400907:	48 83 ec 10          	sub    $0x10,%rsp
+  40090b:	48 83 e4 f0          	and    $0xfffffffffffffff0,%rsp
+  40090f:	48 8d 3d c1 02 00 00 	lea    0x2c1(%rip),%rdi        # 400bd7  <.AFL_SHM_ENV>  // 这个在后面知道其实是保存了共享内存的标识符
+  400916:	e8 d5 fc ff ff       	callq  4005f0 <getenv@plt>
+  40091b:	48 85 c0             	test   %rax,%rax
+  40091e:	0f 84 e2 01 00 00    	je     400b06 <__afl_setup_abort>
+  400924:	48 89 c7             	mov    %rax,%rdi
+  400927:	e8 54 fd ff ff       	callq  400680 <atoi@plt>
+  40092c:	48 31 d2             	xor    %rdx,%rdx
+  40092f:	48 31 f6             	xor    %rsi,%rsi
+  400932:	48 89 c7             	mov    %rax,%rdi
+  400935:	e8 36 fd ff ff       	callq  400670 <shmat@plt> // 调用 shmat，产生与共享内存的映射
+  40093a:	48 83 f8 ff          	cmp    $0xffffffffffffffff,%rax
+  40093e:	0f 84 c2 01 00 00    	je     400b06 <__afl_setup_abort>
+  400944:	48 89 c2             	mov    %rax,%rdx  // 这里 rax 很像是 shmat 的返回值，返回的是附加好的共享内存地址
+  400947:	48 89 05 32 07 20 00 	mov    %rax,0x200732(%rip)        # 601080 <__afl_area_ptr>
+  40094e:	48 8d 15 4b 07 20 00 	lea    0x20074b(%rip),%rdx        # 6010a0 <__afl_global_area_ptr>  
+  400955:	48 89 02             	mov    %rax,(%rdx) // 到这里意思是全局指针指向的是共享内存的地址
+  400958:	48 89 c2             	mov    %rax,%rdx // 结合一下 AFL_STORE
+
+```
+
+下面的代码是 AFL 的 forkserver 技术(下面暂时有些信息还不得而知)：
+
+**AFL_FORK**
+
+```
+000000000040095b <__afl_forkserver>:
+  40095b:	52                   	push   %rdx
+  40095c:	52                   	push   %rdx
+  40095d:	48 c7 c2 04 00 00 00 	mov    $0x4,%rdx
+  400964:	48 8d 35 29 07 20 00 	lea    0x200729(%rip),%rsi        # 601094 <__afl_temp>
+  40096b:	48 c7 c7 c7 00 00 00 	mov    $0xc7,%rdi
+  400972:	e8 99 fc ff ff       	callq  400610 <write@plt>
+  400977:	48 83 f8 04          	cmp    $0x4,%rax
+  40097b:	0f 85 98 00 00 00    	jne    400a19 <__afl_fork_resume>
+```
+
+**AFL_WAIT_LOOP**
+
+```
+000000000400981 <__afl_fork_wait_loop>:
+  400981:	48 c7 c2 04 00 00 00 	mov    $0x4,%rdx
+  400988:	48 8d 35 05 07 20 00 	lea    0x200705(%rip),%rsi        # 601094 <__afl_temp>
+  40098f:	48 c7 c7 c6 00 00 00 	mov    $0xc6,%rdi
+  400996:	e8 a5 fc ff ff       	callq  400640 <read@plt>
+  40099b:	48 83 f8 04          	cmp    $0x4,%rax
+  40099f:	0f 85 59 01 00 00    	jne    400afe <__afl_die>
+  4009a5:	e8 e6 fc ff ff       	callq  400690 <fork@plt>
+  4009aa:	48 83 f8 00          	cmp    $0x0,%rax
+  4009ae:	0f 8c 4a 01 00 00    	jl     400afe <__afl_die> // fork 失败
+  4009b4:	74 63                	je     400a19 <__afl_fork_resume>
+  4009b6:	89 05 d4 06 20 00    	mov    %eax,0x2006d4(%rip)        # 601090 <__afl_fork_pid>
+  4009bc:	48 c7 c2 04 00 00 00 	mov    $0x4,%rdx
+  4009c3:	48 8d 35 c6 06 20 00 	lea    0x2006c6(%rip),%rsi        # 601090 <__afl_fork_pid>
+  4009ca:	48 c7 c7 c7 00 00 00 	mov    $0xc7,%rdi
+  4009d1:	e8 3a fc ff ff       	callq  400610 <write@plt>
+  4009d6:	48 c7 c2 00 00 00 00 	mov    $0x0,%rdx
+  4009dd:	48 8d 35 b0 06 20 00 	lea    0x2006b0(%rip),%rsi        # 601094 <__afl_temp>
+  4009e4:	48 8b 3d a5 06 20 00 	mov    0x2006a5(%rip),%rdi        # 601090 <__afl_fork_pid>
+  4009eb:	e8 70 fc ff ff       	callq  400660 <waitpid@plt>
+  4009f0:	48 83 f8 00          	cmp    $0x0,%rax
+  4009f4:	0f 8e 04 01 00 00    	jle    400afe <__afl_die>
+  4009fa:	48 c7 c2 04 00 00 00 	mov    $0x4,%rdx
+  400a01:	48 8d 35 8c 06 20 00 	lea    0x20068c(%rip),%rsi        # 601094 <__afl_temp>
+  400a08:	48 c7 c7 c7 00 00 00 	mov    $0xc7,%rdi
+  400a0f:	e8 fc fb ff ff       	callq  400610 <write@plt>
+  400a14:	e9 68 ff ff ff       	jmpq   400981 <__afl_fork_wait_loop>
+```
+
+afl_fork_resume 没什么说的，就是处理堆栈，把现场还原
+
+---
 
 ###### afl-fuzz
 
